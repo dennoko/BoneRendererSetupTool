@@ -14,8 +14,9 @@ namespace Hays.EditorTools
 	public static class BoneRendererSetupTool
 	{
 		private const string MenuPath = "Tools/Animation Rigging/Setup Bone Renderer for Humanoid";
-		private const string GoMenuAnimator = "GameObject/Animation Rigging/Setup Bone Renderer (Humanoid via Animator)";
-		private const string GoMenuName = "GameObject/Animation Rigging/Setup Bone Renderer (Humanoid by Name)";
+	private const string GoMenuAnimator = "GameObject/Animation Rigging/Setup Bone Renderer (Humanoid via Animator)";
+	private const string GoMenuName = "GameObject/Animation Rigging/Setup Bone Renderer (Humanoid by Name)";
+	private const string GoMenuFromSMR = "GameObject/Animation Rigging/Setup Bone Renderer (From Skinned Meshes)";
 
 		[MenuItem(MenuPath)]
 		private static void SetupSelected()
@@ -140,6 +141,68 @@ namespace Hays.EditorTools
 			}
 
 			return unique;
+		}
+
+		private static List<Transform> CollectBonesFromSkinnedMeshes(GameObject root, bool onlyHumanoidRelated, out int smrCount)
+		{
+			var result = new List<Transform>(128);
+			smrCount = 0;
+
+			if (root == null)
+				return result;
+
+			var smrs = root.GetComponentsInChildren<SkinnedMeshRenderer>(true);
+			smrCount = smrs?.Length ?? 0;
+
+			// Prepare humanoid set if filtering enabled
+			HashSet<Transform> humanoidSet = null;
+			if (onlyHumanoidRelated)
+			{
+				if (TryGetHumanoidAnimator(root, out var animator))
+				{
+					humanoidSet = new HashSet<Transform>(CollectHumanoidTransforms(animator));
+				}
+				else
+				{
+					// Try to find in parents
+					var a = root.GetComponentInParent<Animator>();
+					if (a != null && a.avatar != null && a.avatar.isValid && a.avatar.isHuman)
+						humanoidSet = new HashSet<Transform>(CollectHumanoidTransforms(a));
+				}
+			}
+
+			var seen = new HashSet<Transform>();
+			if (smrs != null)
+			{
+				foreach (var smr in smrs)
+				{
+					if (smr == null || smr.bones == null) continue;
+					foreach (var b in smr.bones)
+					{
+						if (b == null) continue;
+						if (humanoidSet != null && !IsRelatedToHumanoid(b, humanoidSet))
+							continue;
+						if (seen.Add(b))
+							result.Add(b);
+					}
+				}
+			}
+
+			return result;
+		}
+
+		private static bool IsRelatedToHumanoid(Transform t, HashSet<Transform> humanoidSet)
+		{
+			if (t == null || humanoidSet == null) return false;
+			var cur = t;
+			// walk up until root
+			while (cur != null)
+			{
+				if (humanoidSet.Contains(cur))
+					return true;
+				cur = cur.parent;
+			}
+			return false;
 		}
 
 		private static bool AssignToBoneRenderer(BoneRenderer boneRenderer, List<Transform> transforms, out string error)
@@ -334,6 +397,75 @@ namespace Hays.EditorTools
 			}
 
 			return result;
+		}
+
+		[MenuItem(GoMenuFromSMR, false, 2)]
+		private static void SetupFromSkinnedMeshes_Context()
+		{
+			var selected = Selection.gameObjects;
+			if (selected == null || selected.Length == 0)
+			{
+				EditorUtility.DisplayDialog("Setup Bone Renderer (From Skinned Meshes)", "Select one or more GameObjects containing SkinnedMeshRenderers.", "OK");
+				return;
+			}
+
+			int processed = 0;
+			foreach (var go in selected)
+			{
+				// Add or get BoneRenderer on the same root
+				BoneRenderer boneRenderer = go.GetComponent<BoneRenderer>();
+				if (boneRenderer == null)
+				{
+					boneRenderer = Undo.AddComponent<BoneRenderer>(go);
+				}
+
+				// Prefer filtering to humanoid-related if possible
+				var transforms = CollectBonesFromSkinnedMeshes(go, onlyHumanoidRelated: true, out int smrCount);
+
+				// If filtering yields nothing but SMRs exist, fallback to unfiltered (pure SMR bones)
+				if (transforms.Count == 0 && smrCount > 0)
+				{
+					transforms = CollectBonesFromSkinnedMeshes(go, onlyHumanoidRelated: false, out _);
+				}
+
+				if (transforms.Count == 0)
+				{
+					Debug.LogWarning($"[BoneRendererSetup] {go.name}: No bones found from SkinnedMeshRenderers under selection.");
+					continue;
+				}
+
+				if (AssignToBoneRenderer(boneRenderer, transforms, out var err))
+				{
+					processed++;
+					Debug.Log($"[BoneRendererSetup] {go.name}: Assigned {transforms.Count} bones from SkinnedMeshRenderers.");
+				}
+				else
+				{
+					Debug.LogWarning($"[BoneRendererSetup] {go.name}: {err}");
+				}
+			}
+
+			if (processed > 0)
+			{
+				var scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene();
+				if (scene.IsValid())
+					EditorSceneManager.MarkSceneDirty(scene);
+			}
+		}
+
+		[MenuItem(GoMenuFromSMR, true)]
+		private static bool Validate_SetupFromSkinnedMeshes_Context()
+		{
+			var selected = Selection.gameObjects;
+			if (selected == null || selected.Length == 0)
+				return false;
+			// Enable if any selection has SMR in children
+			foreach (var go in selected)
+			{
+				if (go.GetComponentInChildren<SkinnedMeshRenderer>(true) != null)
+					return true;
+			}
+			return false;
 		}
 	}
 }
