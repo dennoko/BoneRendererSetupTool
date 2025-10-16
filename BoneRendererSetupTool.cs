@@ -13,10 +13,14 @@ namespace Hays.EditorTools
 	/// </summary>
 	public static class BoneRendererSetupTool
 	{
-		private const string MenuPath = "Tools/Animation Rigging/Setup Bone Renderer for Humanoid";
+    private const string MenuPath = "Tools/Animation Rigging/Setup Bone Renderer for Humanoid";
 	private const string GoMenuAnimator = "GameObject/Animation Rigging/Setup Bone Renderer (Humanoid via Animator)";
 	private const string GoMenuName = "GameObject/Animation Rigging/Setup Bone Renderer (Humanoid by Name)";
 	private const string GoMenuFromSMR = "GameObject/Animation Rigging/Setup Bone Renderer (From Skinned Meshes)";
+	private const string GoMenuRemove = "GameObject/Animation Rigging/Remove Bone Renderer(s)";
+
+	private const string HueEditorPrefsKey = "Hays.BoneRendererSetupTool.HueBase";
+	private const float HueStep = 0.13f; // about 47 degrees per step for good separation
 
 		[MenuItem(MenuPath)]
 		private static void SetupSelected()
@@ -97,6 +101,10 @@ namespace Hays.EditorTools
 				resultMessage = assignErr;
 				return false;
 			}
+
+			// Auto color: assign and advance hue
+			var color = ColorFromNextHue();
+			TrySetBoneRendererColor(boneRenderer, color);
 
 			resultMessage = $"Assigned {transforms.Count} humanoid bones.";
 			return true;
@@ -237,6 +245,61 @@ namespace Hays.EditorTools
 			return true;
 		}
 
+		private static bool TrySetBoneRendererColor(BoneRenderer boneRenderer, Color color)
+		{
+			if (boneRenderer == null) return false;
+			var so = new SerializedObject(boneRenderer);
+			// Try common serialized color property names
+			var candidates = new[] { "m_Color", "m_BoneColor", "color", "boneColor" };
+			SerializedProperty colorProp = null;
+			foreach (var name in candidates)
+			{
+				colorProp = so.FindProperty(name);
+				if (colorProp != null && colorProp.propertyType == SerializedPropertyType.Color)
+					break;
+				colorProp = null;
+			}
+
+			if (colorProp == null)
+			{
+				// Unable to set color for this BoneRenderer version
+				return false;
+			}
+
+			Undo.RecordObject(boneRenderer, "Set Bone Renderer Color");
+			so.Update();
+			colorProp.colorValue = color;
+			so.ApplyModifiedProperties();
+			EditorUtility.SetDirty(boneRenderer);
+			return true;
+		}
+
+		private static Color ColorFromNextHue()
+		{
+			float h = EditorPrefs.GetFloat(HueEditorPrefsKey, 0f);
+			// Convert HSV to RGB
+			var c = Color.HSVToRGB(NormalizeHue01(h), 0.85f, 0.95f);
+			// advance and persist
+			h = NormalizeHue01(h + HueStep);
+			EditorPrefs.SetFloat(HueEditorPrefsKey, h);
+			return c;
+		}
+
+		private static float NormalizeHue01(float h)
+		{
+			if (h >= 0f && h < 1f) return h;
+			h %= 1f;
+			if (h < 0f) h += 1f;
+			return h;
+		}
+
+		[MenuItem("Tools/Animation Rigging/Reset Bone Renderer Color Cycle")] 
+		private static void ResetColorCycle()
+		{
+			EditorPrefs.DeleteKey(HueEditorPrefsKey);
+			Debug.Log("[BoneRendererSetup] Color cycle reset.");
+		}
+
 		// ---------------- GameObject (Hierarchy) context menus ----------------
 
 		[MenuItem(GoMenuAnimator, false, 0)]
@@ -314,6 +377,8 @@ namespace Hays.EditorTools
 				if (AssignToBoneRenderer(boneRenderer, transforms, out var err))
 				{
 					processed++;
+					// Auto color
+					TrySetBoneRendererColor(boneRenderer, ColorFromNextHue());
 					Debug.Log($"[BoneRendererSetup] {go.name}: Assigned {transforms.Count} humanoid-named bones.");
 				}
 				else
@@ -437,6 +502,8 @@ namespace Hays.EditorTools
 				if (AssignToBoneRenderer(boneRenderer, transforms, out var err))
 				{
 					processed++;
+					// Auto color
+					TrySetBoneRendererColor(boneRenderer, ColorFromNextHue());
 					Debug.Log($"[BoneRendererSetup] {go.name}: Assigned {transforms.Count} bones from SkinnedMeshRenderers.");
 				}
 				else
@@ -463,6 +530,53 @@ namespace Hays.EditorTools
 			foreach (var go in selected)
 			{
 				if (go.GetComponentInChildren<SkinnedMeshRenderer>(true) != null)
+					return true;
+			}
+			return false;
+		}
+
+		[MenuItem(GoMenuRemove, false, 49)]
+		private static void RemoveBoneRenderers_Context()
+		{
+			var selected = Selection.gameObjects;
+			if (selected == null || selected.Length == 0)
+			{
+				EditorUtility.DisplayDialog("Remove Bone Renderer", "Select one or more GameObjects with BoneRenderer components.", "OK");
+				return;
+			}
+
+			int removed = 0;
+			foreach (var go in selected)
+			{
+				var comps = go.GetComponents<BoneRenderer>();
+				foreach (var c in comps)
+				{
+					Undo.DestroyObjectImmediate(c);
+					removed++;
+				}
+			}
+
+			if (removed > 0)
+			{
+				var scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene();
+				if (scene.IsValid())
+					EditorSceneManager.MarkSceneDirty(scene);
+				Debug.Log($"[BoneRendererSetup] Removed {removed} BoneRenderer component(s).");
+			}
+			else
+			{
+				Debug.Log("[BoneRendererSetup] No BoneRenderer components found to remove.");
+			}
+		}
+
+		[MenuItem(GoMenuRemove, true)]
+		private static bool Validate_RemoveBoneRenderers_Context()
+		{
+			var selected = Selection.gameObjects;
+			if (selected == null || selected.Length == 0) return false;
+			foreach (var go in selected)
+			{
+				if (go.GetComponent<BoneRenderer>() != null)
 					return true;
 			}
 			return false;
